@@ -1776,6 +1776,7 @@ dependencies = [
 name = "wgpu_test"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "env_logger",
  "log",
  "pollster",
