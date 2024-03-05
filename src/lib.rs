@@ -1,4 +1,5 @@
 use bytemuck::{cast_slice, Pod, Zeroable};
+use image::{load_from_memory, GenericImageView};
 use std::{collections::HashMap, hash::BuildHasherDefault, iter::once, mem::size_of};
 use wgpu::{
     naga::ShaderStage,
@@ -8,6 +9,7 @@ use wgpu::{
 use winit::{
     event::*,
     event_loop::EventLoop,
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowBuilder},
 };
 
@@ -16,22 +18,27 @@ const VERTICES: &[Vertex] = &[
     Vertex {
         position: [-0.0868241, 0.49240386, 0.0],
         color: [0.5, 0.0, 0.5],
+        tex_coords: [0.4131759, 0.00759614],
     }, // A
     Vertex {
         position: [-0.49513406, 0.06958647, 0.0],
         color: [0.5, 0.0, 0.5],
+        tex_coords: [0.0048659444, 0.43041354],
     }, // B
     Vertex {
         position: [-0.21918549, -0.44939706, 0.0],
         color: [0.5, 0.0, 0.5],
+        tex_coords: [0.28081453, 0.949397],
     }, // C
     Vertex {
         position: [0.35966998, -0.3473291, 0.0],
         color: [0.5, 0.0, 0.5],
+        tex_coords: [0.85967, 0.84732914],
     }, // D
     Vertex {
         position: [0.44147372, 0.2347359, 0.0],
         color: [0.5, 0.0, 0.5],
+        tex_coords: [0.9414737, 0.2652641],
     }, // E
 ];
 
@@ -42,13 +49,15 @@ const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
 struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
+    tex_coords: [f32; 2],
 }
 
 unsafe impl Pod for Vertex {}
 unsafe impl Zeroable for Vertex {}
 
 impl Vertex {
-    const ATTRIBS: [VertexAttribute; 2] = vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+    const ATTRIBS: [VertexAttribute; 3] =
+        vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
 
     fn desc() -> VertexBufferLayout<'static> {
         VertexBufferLayout {
@@ -68,6 +77,7 @@ pub struct Context<'a> {
     vertex_buffer: Buffer,
     index_buffer: Buffer,
     indices_length: u32,
+    texture_bind_group: BindGroup,
 }
 
 impl<'a> Context<'a> {
@@ -114,6 +124,95 @@ impl<'a> Context<'a> {
 
         println!("format: {:?}", format);
 
+        let diffuse_bytes = include_bytes!("resources/happy-tree.png");
+        let diffuse_image = load_from_memory(diffuse_bytes).unwrap();
+        let diffuse_rgba = diffuse_image.to_rgba8();
+        let dimensions = diffuse_image.dimensions();
+
+        let texture_size = Extent3d {
+            width: dimensions.0,
+            height: dimensions.1,
+            depth_or_array_layers: 1,
+        };
+
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            // Depth (e.g. only x; x,y; or x, y, z)
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            &diffuse_rgba,
+            ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * dimensions.0),
+                rows_per_image: Some(dimensions.1),
+            },
+            texture_size,
+        );
+
+        let texture_view = texture.create_view(&TextureViewDescriptor::default());
+        let texture_sampler = device.create_sampler(&SamplerDescriptor {
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Nearest,
+            mipmap_filter: FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Describes a set of resources and how they can be accessed by a shader.
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("texture_bind_group_layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: TextureSampleType::Float { filterable: true },
+                            view_dimension: TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let texture_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("texture_bind_group"),
+            layout: &texture_bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&texture_view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&texture_sampler),
+                },
+            ],
+        });
+
         let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: cast_slice(VERTICES),
@@ -148,7 +247,7 @@ impl<'a> Context<'a> {
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[&texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -201,6 +300,7 @@ impl<'a> Context<'a> {
             vertex_buffer,
             index_buffer,
             indices_length,
+            texture_bind_group,
         }
     }
 
@@ -255,6 +355,7 @@ impl<'a> Context<'a> {
         });
 
         render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.texture_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
         render_pass.draw_indexed(0..self.indices_length, 0, 0..1);
@@ -294,6 +395,15 @@ pub async fn run() {
                         Err(e) => eprintln!("{:?}", e),
                     }
                 }
+                WindowEvent::KeyboardInput {
+                    event:
+                        KeyEvent {
+                            physical_key: PhysicalKey::Code(KeyCode::Escape),
+                            state: ElementState::Pressed,
+                            ..
+                        },
+                    ..
+                } => elwt.exit(),
                 _ => {}
             },
             _ => {}
