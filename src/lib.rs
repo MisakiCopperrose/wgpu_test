@@ -1,3 +1,5 @@
+mod texture;
+
 use bytemuck::{cast_slice, Pod, Zeroable};
 use image::{load_from_memory, GenericImageView};
 use std::{collections::HashMap, hash::BuildHasherDefault, iter::once, mem::size_of};
@@ -78,6 +80,7 @@ pub struct Context<'a> {
     index_buffer: Buffer,
     indices_length: u32,
     texture_bind_group: BindGroup,
+    texture: texture::Texture,
 }
 
 impl<'a> Context<'a> {
@@ -124,55 +127,9 @@ impl<'a> Context<'a> {
 
         println!("format: {:?}", format);
 
-        let diffuse_bytes = include_bytes!("resources/happy-tree.png");
-        let diffuse_image = load_from_memory(diffuse_bytes).unwrap();
-        let diffuse_rgba = diffuse_image.to_rgba8();
-        let dimensions = diffuse_image.dimensions();
-
-        let texture_size = Extent3d {
-            width: dimensions.0,
-            height: dimensions.1,
-            depth_or_array_layers: 1,
-        };
-
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some("texture"),
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            // Depth (e.g. only x; x,y; or x, y, z)
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8UnormSrgb,
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        queue.write_texture(
-            ImageCopyTexture {
-                texture: &texture,
-                mip_level: 0,
-                origin: Origin3d::ZERO,
-                aspect: TextureAspect::All,
-            },
-            &diffuse_rgba,
-            ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * dimensions.0),
-                rows_per_image: Some(dimensions.1),
-            },
-            texture_size,
-        );
-
-        let texture_view = texture.create_view(&TextureViewDescriptor::default());
-        let texture_sampler = device.create_sampler(&SamplerDescriptor {
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Nearest,
-            mipmap_filter: FilterMode::Nearest,
-            ..Default::default()
-        });
+        let diffuse_bytes = include_bytes!("resources/textures/happy-tree.png");
+        let texture =
+            texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
 
         // Describes a set of resources and how they can be accessed by a shader.
         let texture_bind_group_layout =
@@ -204,11 +161,11 @@ impl<'a> Context<'a> {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: BindingResource::TextureView(&texture_view),
+                    resource: BindingResource::TextureView(&texture.view),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: BindingResource::Sampler(&texture_sampler),
+                    resource: BindingResource::Sampler(&texture.sampler),
                 },
             ],
         });
@@ -230,7 +187,7 @@ impl<'a> Context<'a> {
         let vertex_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Shader"),
             source: ShaderSource::Glsl {
-                shader: include_str!("shader.vert").into(),
+                shader: include_str!("resources/shaders/shader.vert").into(),
                 stage: ShaderStage::Vertex,
                 defines: HashMap::with_hasher(BuildHasherDefault::default()),
             },
@@ -239,7 +196,7 @@ impl<'a> Context<'a> {
         let fragment_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Shader"),
             source: ShaderSource::Glsl {
-                shader: include_str!("shader.frag").into(),
+                shader: include_str!("resources/shaders/shader.frag").into(),
                 stage: ShaderStage::Fragment,
                 defines: HashMap::with_hasher(BuildHasherDefault::default()),
             },
@@ -301,6 +258,7 @@ impl<'a> Context<'a> {
             index_buffer,
             indices_length,
             texture_bind_group,
+            texture,
         }
     }
 

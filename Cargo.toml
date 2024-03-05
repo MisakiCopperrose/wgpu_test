@@ -13,3 +13,4 @@ log = "0.4"
 pollster = "0.3"
 bytemuck = "1.14"
 image = { version = "0.24", default-features = false, features = ["png"] }
+anyhow = "1.0"
