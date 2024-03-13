@@ -1,7 +1,10 @@
+mod camera;
+mod instance;
 mod texture;
 
 use bytemuck::{cast_slice, Pod, Zeroable};
-use image::{load_from_memory, GenericImageView};
+use glam::{vec2, vec3, vec4, Quat, Vec2, Vec3};
+use rand::Rng;
 use std::{collections::HashMap, hash::BuildHasherDefault, iter::once, mem::size_of};
 use wgpu::{
     naga::ShaderStage,
@@ -15,51 +18,52 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+use crate::{camera::Camera, instance::InstanceData};
 // lib.rs
 const VERTICES: &[Vertex] = &[
     Vertex {
-        position: [-0.0868241, 0.49240386, 0.0],
-        color: [0.5, 0.0, 0.5],
-        tex_coords: [0.4131759, 0.00759614],
+        position: vec3(-0.0868241, 0.49240386, 0.0),
+        tex_coords: vec2(0.4131759, 0.00759614),
     }, // A
     Vertex {
-        position: [-0.49513406, 0.06958647, 0.0],
-        color: [0.5, 0.0, 0.5],
-        tex_coords: [0.0048659444, 0.43041354],
+        position: vec3(-0.49513406, 0.06958647, 0.0),
+        tex_coords: vec2(0.0048659444, 0.43041354),
     }, // B
     Vertex {
-        position: [-0.21918549, -0.44939706, 0.0],
-        color: [0.5, 0.0, 0.5],
-        tex_coords: [0.28081453, 0.949397],
+        position: vec3(-0.21918549, -0.44939706, 0.0),
+        tex_coords: vec2(0.28081453, 0.949397),
     }, // C
     Vertex {
-        position: [0.35966998, -0.3473291, 0.0],
-        color: [0.5, 0.0, 0.5],
-        tex_coords: [0.85967, 0.84732914],
+        position: vec3(0.35966998, -0.3473291, 0.0),
+        tex_coords: vec2(0.85967, 0.84732914),
     }, // D
     Vertex {
-        position: [0.44147372, 0.2347359, 0.0],
-        color: [0.5, 0.0, 0.5],
-        tex_coords: [0.9414737, 0.2652641],
+        position: vec3(0.44147372, 0.2347359, 0.0),
+        tex_coords: vec2(0.9414737, 0.2652641),
     }, // E
 ];
 
-const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
+const CAMERA_SPEED: f32 = 5.0;
+const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4, 0];
+const NUM_INSTANCES_PER_ROW: u32 = 10;
+const INSTANCE_DISPLACEMENT: Vec3 = vec3(
+    NUM_INSTANCES_PER_ROW as f32 * 0.5,
+    0.0,
+    NUM_INSTANCES_PER_ROW as f32 * 0.5,
+);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-    tex_coords: [f32; 2],
+    position: Vec3,
+    tex_coords: Vec2,
 }
 
 unsafe impl Pod for Vertex {}
 unsafe impl Zeroable for Vertex {}
 
 impl Vertex {
-    const ATTRIBS: [VertexAttribute; 3] =
-        vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+    const ATTRIBS: [VertexAttribute; 2] = vertex_attr_array![0 => Float32x3, 1 => Float32x2];
 
     fn desc() -> VertexBufferLayout<'static> {
         VertexBufferLayout {
@@ -81,6 +85,11 @@ pub struct Context<'a> {
     indices_length: u32,
     texture_bind_group: BindGroup,
     texture: texture::Texture,
+    camera: Camera,
+    camera_buffer: Buffer,
+    camera_bind_group: BindGroup,
+    instances: Vec<instance::Instance>,
+    instance_buffer: Buffer,
 }
 
 impl<'a> Context<'a> {
@@ -127,10 +136,13 @@ impl<'a> Context<'a> {
 
         println!("format: {:?}", format);
 
-        let diffuse_bytes = include_bytes!("resources/textures/happy-tree.png");
-        let texture =
-            texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
-
+        let texture = texture::Texture::from_file(
+            &device,
+            &queue,
+            "src/resources/textures/happy-tree.png",
+            "happy-tree.png",
+        )
+        .unwrap();
         // Describes a set of resources and how they can be accessed by a shader.
         let texture_bind_group_layout =
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -170,6 +182,82 @@ impl<'a> Context<'a> {
             ],
         });
 
+        let camera = Camera {
+            eye: vec3(0f32, 1f32, 2f32),
+            target: Vec3::ZERO,
+            up: vec3(0f32, 1f32, 0f32),
+            aspect: config.width as f32 / config.height as f32,
+            fov_y: 45.0,
+            z_near: 0.1,
+            z_far: 100.0,
+        };
+
+        let camera_matrix = camera.build_view_projection();
+
+        let camera_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: cast_slice(&[camera_matrix]),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("camera_bind_group_layout"),
+            });
+
+        let camera_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+            label: Some("camera_bind_group"),
+        });
+
+        let instances = (0..NUM_INSTANCES_PER_ROW)
+            .flat_map(|z| {
+                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+                    let position = vec3(x as f32, 0.0, z as f32) - INSTANCE_DISPLACEMENT;
+
+                    let rotation = if position == vec3(0.0, 0.0, 0.0) {
+                        Quat::from_axis_angle(vec3(0.0, 0.0, 1.0), f32::to_radians(0.0))
+                    } else {
+                        Quat::from_axis_angle(position.normalize(), f32::to_radians(45.0))
+                    };
+
+                    let colour_value = rand::thread_rng().gen();
+                    let colour = vec4(colour_value, colour_value, colour_value, 1.0);
+
+                    instance::Instance {
+                        position,
+                        rotation,
+                        colour,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let instance_data = instances
+            .iter()
+            .map(instance::Instance::to_raw)
+            .collect::<Vec<_>>();
+
+        let instance_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Instance buffer"),
+            contents: cast_slice(&instance_data),
+            usage: BufferUsages::VERTEX,
+        });
+
         let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: cast_slice(VERTICES),
@@ -204,7 +292,7 @@ impl<'a> Context<'a> {
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
+            bind_group_layouts: &[&texture_bind_group_layout, &camera_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -215,7 +303,7 @@ impl<'a> Context<'a> {
             vertex: VertexState {
                 module: &vertex_shader,
                 entry_point: "main",
-                buffers: &[Vertex::desc()],
+                buffers: &[Vertex::desc(), InstanceData::descriptor()],
             },
             // Define fragment pass
             fragment: Some(FragmentState {
@@ -232,7 +320,7 @@ impl<'a> Context<'a> {
                 topology: PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: FrontFace::Ccw,
-                cull_mode: Some(Face::Back),
+                cull_mode: None,
                 polygon_mode: PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -259,6 +347,11 @@ impl<'a> Context<'a> {
             indices_length,
             texture_bind_group,
             texture,
+            camera,
+            camera_buffer,
+            camera_bind_group,
+            instances,
+            instance_buffer,
         }
     }
 
@@ -273,10 +366,17 @@ impl<'a> Context<'a> {
     }
 
     fn input(&mut self, event: &WindowEvent) -> bool {
-        false
+        self.camera.input_move_camera(event, CAMERA_SPEED)
     }
 
-    fn update(&mut self) {}
+    fn update(&mut self) {
+        let view_proj = self.camera.build_view_projection();
+
+        std::println!("View: {}", view_proj);
+
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, cast_slice(&[view_proj]))
+    }
 
     fn render(&mut self) -> Result<(), SurfaceError> {
         // Get surface texture
@@ -314,10 +414,11 @@ impl<'a> Context<'a> {
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.texture_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
-        render_pass.draw_indexed(0..self.indices_length, 0, 0..1);
-
+        render_pass.draw_indexed(0..self.indices_length, 0, 0..self.instances.len() as _);
         // Release the mutable borrow of the render pass
         drop(render_pass);
         // Submit the clear pass
@@ -338,32 +439,41 @@ pub async fn run() {
     let mut context = Context::new(&window).await;
 
     event_loop
-        .run(move |event, elwt| match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::Resized(size) => context.resize(size.width, size.height),
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::RedrawRequested => {
-                    context.update();
-                    match context.render() {
-                        Ok(_) => {}
-                        Err(SurfaceError::Lost) => {
-                            context.resize(context.config.width, context.config.height)
+        .run(|event, elwt| match event {
+            Event::WindowEvent { event, .. } => {
+                if !context.input(&event) {
+                    match event {
+                        WindowEvent::Resized(size) => context.resize(size.width, size.height),
+                        WindowEvent::CloseRequested => elwt.exit(),
+                        WindowEvent::RedrawRequested => {
+                            std::println!("Update");
+
+                            context.update();
+
+                            match context.render() {
+                                Ok(_) => {}
+                                Err(SurfaceError::Lost) => {
+                                    context.resize(context.config.width, context.config.height)
+                                }
+                                Err(SurfaceError::OutOfMemory) => elwt.exit(),
+                                Err(e) => eprintln!("{:?}", e),
+                            }
                         }
-                        Err(SurfaceError::OutOfMemory) => elwt.exit(),
-                        Err(e) => eprintln!("{:?}", e),
-                    }
-                }
-                WindowEvent::KeyboardInput {
-                    event:
-                        KeyEvent {
-                            physical_key: PhysicalKey::Code(KeyCode::Escape),
-                            state: ElementState::Pressed,
+                        WindowEvent::KeyboardInput {
+                            event:
+                                KeyEvent {
+                                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                                    state: ElementState::Pressed,
+                                    ..
+                                },
                             ..
-                        },
-                    ..
-                } => elwt.exit(),
-                _ => {}
-            },
+                        } => elwt.exit(),
+                        _ => {}
+                    }
+                } else {
+                    window.request_redraw();
+                }
+            }
             _ => {}
         })
         .unwrap()

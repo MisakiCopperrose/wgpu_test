@@ -1,6 +1,4 @@
-use anyhow::*;
 use image::GenericImageView;
-use wgpu::Origin3d;
 
 pub struct Texture {
     pub texture: wgpu::Texture,
@@ -9,13 +7,13 @@ pub struct Texture {
 }
 
 impl Texture {
-    pub fn from_bytes(
+    pub fn from_file(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        bytes: &[u8],
+        path: &str,
         label: &str,
-    ) -> Result<Self> {
-        let img = image::load_from_memory(bytes)?;
+    ) -> anyhow::Result<Self> {
+        let img = image::io::Reader::open(path)?.decode()?;
         Self::from_image(device, queue, &img, Some(label))
     }
 
@@ -24,7 +22,7 @@ impl Texture {
         queue: &wgpu::Queue,
         img: &image::DynamicImage,
         label: Option<&str>,
-    ) -> Result<Self> {
+    ) -> anyhow::Result<Self> {
         let rgba = img.to_rgba8();
         let dimensions = img.dimensions();
 
@@ -50,7 +48,7 @@ impl Texture {
                 aspect: wgpu::TextureAspect::All,
                 texture: &texture,
                 mip_level: 0,
-                origin: Origin3d::ZERO,
+                origin: wgpu::Origin3d::ZERO,
             },
             &rgba,
             wgpu::ImageDataLayout {
