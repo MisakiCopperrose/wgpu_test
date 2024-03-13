@@ -78,6 +78,7 @@ pub struct Context<'a> {
     device: Device,
     queue: Queue,
     surface: Surface<'a>,
+    depth_texture: texture::Texture,
     config: SurfaceConfiguration,
     pipeline: RenderPipeline,
     vertex_buffer: Buffer,
@@ -290,6 +291,9 @@ impl<'a> Context<'a> {
             },
         });
 
+        let depth_texture =
+            texture::Texture::create_depth_texture(&device, &config, "depth_texture");
+
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
             bind_group_layouts: &[&texture_bind_group_layout, &camera_bind_group_layout],
@@ -326,7 +330,14 @@ impl<'a> Context<'a> {
                 conservative: false,
             },
             // Define what to use for depth stenciling
-            depth_stencil: None,
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                // LESS means pixels will be drawn front to back
+                depth_compare: CompareFunction::Less,
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
             // MSAA
             multisample: MultisampleState {
                 count: 1,
@@ -340,6 +351,7 @@ impl<'a> Context<'a> {
             device,
             queue,
             surface,
+            depth_texture,
             config,
             pipeline,
             vertex_buffer,
@@ -363,6 +375,9 @@ impl<'a> Context<'a> {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
+
+        self.depth_texture =
+            texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
     }
 
     fn input(&mut self, event: &WindowEvent) -> bool {
@@ -407,7 +422,14 @@ impl<'a> Context<'a> {
                     store: StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &self.depth_texture.view,
+                depth_ops: Some(Operations {
+                    load: LoadOp::Clear(1.0),
+                    store: StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
         });
